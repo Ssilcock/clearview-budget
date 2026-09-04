@@ -1,4 +1,21 @@
 <!DOCTYPE html>
+<!--
+  Clearview Budget — private in-browser bank statement analyser
+  Current: v1.6 — 4 September 2026
+
+  Revision history
+  v1.6  4 Sep 2026  Version number and revision notes added; shown in page footer
+  v1.5  25 Aug 2026  Income category (auto-detects PENSION / SUPER INCOME / SALARY etc.);
+                     smarter "income" answers; Money-in card shows income portion
+  v1.4  24 Aug 2026  Date-range banner with partial-month warning; Load-a-different-file button
+  v1.3  23 Aug 2026  Category spending limits with live trackers and alerts;
+                     Text-these-alerts / Copy buttons
+  v1.2  22 Aug 2026  Top-3 categories pie chart with month selector; logo colour update
+  v1.1  21 Aug 2026  Click-to-recategorise with remembered merchant rules; custom categories
+                     (inline editor); dismissable alerts; animated CSV drop zone; branding
+  v1.0  18 Aug 2026  First build: ANZ CSV import, question bar, alerts, monthly chart,
+                     category breakdown, transaction table
+-->
 <html lang="en-AU">
 <head>
 <meta charset="UTF-8">
@@ -337,7 +354,7 @@ footer{max-width:1040px;margin:0 auto;padding:0 16px 40px;color:var(--muted);fon
 </section>
 </div>
 </main>
-<footer>Amounts are read directly from your statement file and analysed locally. Categories are automatic best guesses from merchant names — always confirm anything important against your bank records.</footer>
+<footer><span style="float:right;color:#8AA2B8">Clearview Budget v1.6 — 4 September 2026</span>Amounts are read directly from your statement file and analysed locally. Categories are automatic best guesses from merchant names — always confirm anything important against your bank records.</footer>
 
 <script>
 /* ============ Core (data, parsing, analysis) ============ */
@@ -345,6 +362,7 @@ const MONTHS=["january","february","march","april","may","june","july","august",
 const MONTH_ABBR=MONTHS.map(m=>m.slice(0,3));
 
 const CATEGORIES=[
+ ["Income",["PENSION","CENTRELINK","SALARY","PAYROLL","WAGES","SUPER INCOME","SUPERANNUATION","AGED PENSION","INCOME"]],
  ["Groceries",["IGA","WOOLWORTHS","COLES","ALDI","FOODWORKS","GUM TREE GOOD FOOD","HARRIS FARM","FRUIT","BUTCHER","BAKER S DELIGHT","BAKERS DELIGHT"]],
  ["Convenience",["7 ELEVEN","7-ELEVEN","NIGHTOWL","EZYMART"]],
  ["Dining & cafes",["CAFE","COFFEE","RESTAURANT","BAKERY","HOTEL","BISTRO","KITCHEN","EATERY","PIZZA","SUSHI","THAI","NOODLE","BURGER","CHIPPERY","FISH AND CHIP","TST*","SQ *","PRET A MANGER","SWEETGREEN","THE TERRACE","THE OBSERVATORY","SANDBAR","BLAKEAWAY","VERSACHIS","BRUNETTI","SANDWICH","ALH VENUES","MONKEYS FOO","MCDONALD","KFC","HUNGRY JACK","GRILL","DINER","BAR ","TAVERN","BREWERY","BREWING"]],
@@ -361,7 +379,7 @@ const CATEGORIES=[
  ["Shopping",["AMAZON","OFFICEWORKS","KMART","TARGET","BIG W","BUNNINGS","MUJI","EBAY","MYER","DAVID JONES","JB HI","HARVEY NORMAN","THE GOOD GUYS","IKEA","SPOTLIGHT","GALLERY","POST ","AUSPOST","DUANE READE","SALOMON","UNIQLO","PAPERSOURCE","SOUVENIR","WHSMITH","ATHLETE","REBEL SPORT","TAF "]],
  ["Travel",["QANTAS","JETSTAR","VIRGIN AUS","REX ","AIRBNB","BOOKING.COM","EXPEDIA","AGODA","HOTELS.COM","WISE AUST","TRAVELEX"]],
  ["Fees & interest",["DEBIT INTEREST","ACCOUNT SERVICING FEE","NON-ANZ ATM","INTNL TRANSACTION FEE","OVERDRAWN","DISHONOUR","LATE PAYMENT FEE"]],
- ["Transfers & payments",["FUNDS TFER","TRANSFER","ANZ INTERNET BANKING","ANZ MOBILE BANKING","BPAY","PAYMENT TO","PAYMENT FROM","PAYID","OSKO","DIRECT CREDIT","DIRECT DEBIT","SALARY","PENSION","CENTRELINK","ATM"]]
+ ["Transfers & payments",["FUNDS TFER","TRANSFER","ANZ INTERNET BANKING","ANZ MOBILE BANKING","BPAY","PAYMENT TO","PAYMENT FROM","PAYID","OSKO","DIRECT CREDIT","DIRECT DEBIT","ATM"]]
 ];
 const TERM_TO_CAT={
  wine:"Alcohol & bottle shops",beer:"Alcohol & bottle shops",alcohol:"Alcohol & bottle shops",grog:"Alcohol & bottle shops","bottle shop":"Alcohol & bottle shops",drinks:"Alcohol & bottle shops",
@@ -374,7 +392,7 @@ const TERM_TO_CAT={
  pets:"Pets",pet:"Pets",dog:"Pets",cat:"Pets",
  lotteries:"Lotteries & giving",lottery:"Lotteries & giving",raffles:"Lotteries & giving",charity:"Lotteries & giving",donations:"Lotteries & giving",gambling:"Lotteries & giving",lotto:"Lotteries & giving",
  fuel:"Transport & fuel",petrol:"Transport & fuel",transport:"Transport & fuel",parking:"Transport & fuel",tolls:"Transport & fuel",uber:"Transport & fuel",
- shopping:"Shopping",travel:"Travel",entertainment:"Entertainment",overseas:"Overseas travel","new york":"Overseas travel",fees:"Fees & interest",interest:"Fees & interest",transfers:"Transfers & payments"
+ shopping:"Shopping",travel:"Travel",entertainment:"Entertainment",overseas:"Overseas travel","new york":"Overseas travel",fees:"Fees & interest",interest:"Fees & interest",transfers:"Transfers & payments",income:"Income",pension:"Income",salary:"Income"
 };
 
 let CUSTOM_CATS=[];
@@ -642,10 +660,17 @@ function answer(q){
       note:"Matched on known subscription services (Apple, Spotify, Netflix, Adobe and similar).",list:listOf(s)};
   }
   // Income
-  if(/income|earn|money in|deposits|deposited|received|came in/.test(ql)){
-    const s=scope.filter(t=>t.amount>0);
-    return{head:"Money in during "+scopeName+": "+fmt(s.reduce((a,t)=>a+t.amount,0))+" across "+s.length+" credits.",
-      note:"Includes transfers into the account.",list:listOf(s.slice(0,15))};
+  if(/income|earn|money in|deposits|deposited|received|came in|pension|salary/.test(ql)){
+    const credits=scope.filter(t=>t.amount>0);
+    const inc=credits.filter(t=>t.cat==="Income");
+    if(inc.length){
+      const other=credits.reduce((a,t)=>a+t.amount,0)-inc.reduce((a,t)=>a+t.amount,0);
+      return{head:"Income in "+scopeName+": "+fmt(inc.reduce((a,t)=>a+t.amount,0))+" across "+inc.length+" payments.",
+        note:other>0.005?("A further "+fmt(other)+" came in as other credits (transfers, refunds and similar). Click a credit's category tag and choose Income if any of those are really income."):"",
+        list:listOf(inc.slice(0,15))};
+    }
+    return{head:"Money in during "+scopeName+": "+fmt(credits.reduce((a,t)=>a+t.amount,0))+" across "+credits.length+" credits.",
+      note:"Includes transfers into the account. To track true income, click an incoming payment's category tag and set it to Income.",list:listOf(credits.slice(0,15))};
   }
   // Biggest
   if(/biggest|largest|top |most expensive/.test(ql)){
@@ -746,6 +771,8 @@ function render(){
   renderRangeBar();
   const {inc,out}=totals(TX);
   $("sIn").textContent=fmt(inc); $("sOut").textContent=fmt(out);
+  const incomeTot=TX.filter(t=>t.amount>0&&t.cat==="Income").reduce((a,t)=>a+t.amount,0);
+  $("sPeriod").textContent=incomeTot>0?(fmt(incomeTot)+" of it categorised as income"):periodLabel();
   const net=inc-out; $("sNet").textContent=fmtSigned(net);
   $("sNet").style.color=net>=0?"var(--in)":"var(--out)";
   $("sPeriod").textContent=periodLabel();
