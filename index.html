@@ -1,9 +1,20 @@
 <!DOCTYPE html>
 <!--
   Clearview Budget — private in-browser bank statement analyser
-  Current: v1.9 — 4 September 2026
+  Current: v1.13 — 4 September 2026
 
   Revision history
+  v1.13 4 Sep 2026  Fix: changing a category on a rule-protected transaction was silently
+                    ignored — the clicked transaction now always takes the chosen category.
+                    New "Remembered rules" panel to view and remove saved rules.
+                    Extended-format CSVs: empty fields no longer leave trailing commas
+  v1.12 4 Sep 2026  Income keywords: FROM NORTH (super platform transfers), CTRLINK,
+                    CREDIT INTEREST — income-account statements now categorise themselves
+  v1.11 4 Sep 2026  "Just this transaction" option for credits — marks a single transaction
+                    (e.g. varying income amounts) without creating a wider rule; remembered
+                    across reloads and protected from broader rule changes
+  v1.10 4 Sep 2026  Fix: amount-scoped rules (e.g. income amounts) now outrank merchant-wide
+                    changes, so "All from this source" can no longer undo them
   v1.9  4 Sep 2026  Fix: choosing a category from the dropdown did nothing (bug introduced
                     in v1.7) — category changes and Income scope buttons work again
   v1.8  4 Sep 2026  Fix: Income scope buttons failed to appear when two category pickers
@@ -345,7 +356,9 @@ footer{max-width:1040px;margin:0 auto;padding:0 16px 40px;color:var(--muted);fon
 <section>
   <h2>All transactions</h2>
   <div class="card tablecard">
-    <div class="editnote">Wrong or missing category? Click any category tag to change it — or choose “＋ New category…” to create your own (e.g. Hardware). For spending, the change applies to every transaction from that merchant; for incoming credits you can choose between just that exact amount (ideal for marking pension or super transfers as Income) or everything from that source. All choices are remembered on this device.</div>
+    <div class="editnote">Wrong or missing category? Click any category tag to change it — or choose “＋ New category…” to create your own (e.g. Hardware). For spending, the change applies to every transaction from that merchant; for incoming credits you can choose between just that exact amount (ideal for fixed pension or super transfers), just that one transaction (ideal for varying amounts), or everything from that source. All choices are remembered on this device.</div>
+    <button id="rulesBtn" class="rb-btn" style="margin-bottom:12px">Remembered rules</button>
+    <div id="rulesPanel" style="display:none;margin-bottom:14px;border:1px solid var(--line);border-radius:10px;padding:4px 14px"></div>
     <div class="filters">
       <input id="tSearch" type="search" placeholder="Search descriptions…" aria-label="Search transactions">
       <select id="tCat" aria-label="Filter by category"><option value="">All categories</option></select>
@@ -360,7 +373,7 @@ footer{max-width:1040px;margin:0 auto;padding:0 16px 40px;color:var(--muted);fon
 </section>
 </div>
 </main>
-<footer><span style="float:right;color:#8AA2B8">Clearview Budget v1.9 — 4 September 2026</span>Amounts are read directly from your statement file and analysed locally. Categories are automatic best guesses from merchant names — always confirm anything important against your bank records.</footer>
+<footer><span style="float:right;color:#8AA2B8">Clearview Budget v1.13 — 4 September 2026</span>Amounts are read directly from your statement file and analysed locally. Categories are automatic best guesses from merchant names — always confirm anything important against your bank records.</footer>
 
 <script>
 /* ============ Core (data, parsing, analysis) ============ */
@@ -368,7 +381,7 @@ const MONTHS=["january","february","march","april","may","june","july","august",
 const MONTH_ABBR=MONTHS.map(m=>m.slice(0,3));
 
 const CATEGORIES=[
- ["Income",["PENSION","CENTRELINK","SALARY","PAYROLL","WAGES","SUPER INCOME","SUPERANNUATION","AGED PENSION","INCOME"]],
+ ["Income",["PENSION","CENTRELINK","CTRLINK","SALARY","PAYROLL","WAGES","SUPER INCOME","SUPERANNUATION","AGED PENSION","INCOME","FROM NORTH","CREDIT INTEREST"]],
  ["Groceries",["IGA","WOOLWORTHS","COLES","ALDI","FOODWORKS","GUM TREE GOOD FOOD","HARRIS FARM","FRUIT","BUTCHER","BAKER S DELIGHT","BAKERS DELIGHT"]],
  ["Convenience",["7 ELEVEN","7-ELEVEN","NIGHTOWL","EZYMART"]],
  ["Dining & cafes",["CAFE","COFFEE","RESTAURANT","BAKERY","HOTEL","BISTRO","KITCHEN","EATERY","PIZZA","SUSHI","THAI","NOODLE","BURGER","CHIPPERY","FISH AND CHIP","TST*","SQ *","PRET A MANGER","SWEETGREEN","THE TERRACE","THE OBSERVATORY","SANDBAR","BLAKEAWAY","VERSACHIS","BRUNETTI","SANDWICH","ALH VENUES","MONKEYS FOO","MCDONALD","KFC","HUNGRY JACK","GRILL","DINER","BAR ","TAVERN","BREWERY","BREWING"]],
@@ -420,14 +433,21 @@ function loadCustomRules(){ try{ CUSTOM_RULES=JSON.parse(localStorage.getItem("c
 function saveCustomRules(){ try{ localStorage.setItem("cvb-rules",JSON.stringify(CUSTOM_RULES));
   localStorage.setItem("cvb-rules-amt",JSON.stringify(AMOUNT_RULES)); }catch(e){ /* private mode / preview: session-only */ } }
 function amtKey(merchant,amount){ return merchant+"|"+Math.abs(amount).toFixed(2); }
+let ONE_OFF={}; // txKey -> category (single-transaction overrides)
+function txKey(t){ return t.month+"-"+String(t.date.getDate()).padStart(2,"0")+"|"+t.amount.toFixed(2)+"|"+t.desc.slice(0,40); }
+function loadOneOff(){ try{ ONE_OFF=JSON.parse(localStorage.getItem("cvb-oneoff")||"{}"); }catch(e){ ONE_OFF={}; } }
+function saveOneOff(){ try{ localStorage.setItem("cvb-oneoff",JSON.stringify(ONE_OFF)); }catch(e){} }
+function setOneOffCategory(t,cat){ ONE_OFF[txKey(t)]=cat; saveOneOff(); t.cat=cat; }
+function recomputeCats(){ for(const t of TX){ t.cat=ONE_OFF[txKey(t)]||AMOUNT_RULES[amtKey(t.merchant,t.amount)]||CUSTOM_RULES[t.merchant]||categorise(t.desc); } }
+function ruleCount(){ return Object.keys(ONE_OFF).length+Object.keys(AMOUNT_RULES).length+Object.keys(CUSTOM_RULES).length; }
 function setAmountCategory(merchant,amount,cat){
   AMOUNT_RULES[amtKey(merchant,amount)]=cat; saveCustomRules();
-  let n=0; for(const t of TX) if(t.merchant===merchant&&Math.abs(Math.abs(t.amount)-Math.abs(amount))<0.005){t.cat=cat;n++;}
+  let n=0; for(const t of TX) if(t.merchant===merchant&&Math.abs(Math.abs(t.amount)-Math.abs(amount))<0.005&&!ONE_OFF[txKey(t)]){t.cat=cat;n++;}
   return n;
 }
 function setMerchantCategory(merchant,cat){
   CUSTOM_RULES[merchant]=cat; saveCustomRules();
-  let n=0; for(const t of TX) if(t.merchant===merchant){t.cat=cat;n++;}
+  let n=0; for(const t of TX) if(t.merchant===merchant&&!AMOUNT_RULES[amtKey(merchant,t.amount)]&&!ONE_OFF[txKey(t)]){t.cat=cat;n++;}
   return n;
 }
 let TX=[]; // {date:Date, amount, desc, cat, merchant, overseas, month:'YYYY-MM'}
@@ -482,11 +502,13 @@ function loadRows(rows){
     if(r.length<3)continue;
     const dt=parseDate(r[0]); const amt=parseFloat(String(r[1]).replace(/[$,]/g,""));
     if(!dt||isNaN(amt))continue; // skips header rows automatically
-    const desc=r.slice(2).join(", ").trim();
+    const desc=r.slice(2).filter(f=>String(f).trim()!=="").join(", ").trim();
     const merch=merchantOf(desc);
-    TX.push({date:dt,amount:amt,desc,cat:AMOUNT_RULES[amtKey(merch,amt)]||CUSTOM_RULES[merch]||categorise(desc),merchant:merch,
+    const tx={date:dt,amount:amt,desc,merchant:merch,cat:"",
       overseas:/INC O\/S FEE|INTNL TRANSACTION/i.test(desc),
-      month:dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")});
+      month:dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")};
+    tx.cat=ONE_OFF[txKey(tx)]||AMOUNT_RULES[amtKey(merch,amt)]||CUSTOM_RULES[merch]||categorise(desc);
+    TX.push(tx);
   }
   TX.sort((a,b)=>b.date-a.date);
   return TX.length;
@@ -764,7 +786,8 @@ function refreshAll(){
   const months=byMonth();
   const spendNoTfr=TX.filter(t=>t.amount<0&&t.cat!=="Transfers & payments").reduce((a,t)=>a+-t.amount,0);
   $("sAvg").textContent=fmt(spendNoTfr/Math.max(months.length,1));
-  fillFilters(); renderAlerts(); fillPieMonths(); renderPie(); renderCats(); renderTable();
+  fillFilters(); renderAlerts(); fillPieMonths(); renderPie(); renderCats(); renderTable(); updateRulesBtn();
+  const p=$("rulesPanel"); if(p&&p.style.display!=="none")renderRules();
 }
 let FILE_NAME="";
 function renderRangeBar(){
@@ -795,7 +818,7 @@ function render(){
   const months=byMonth();
   const spendNoTfr=TX.filter(t=>t.amount<0&&t.cat!=="Transfers & payments").reduce((a,t)=>a+-t.amount,0);
   $("sAvg").textContent=fmt(spendNoTfr/Math.max(months.length,1));
-  renderAlerts(); renderMonths(months); fillPieMonths(); renderPie(); renderCats(); renderTable(); renderChips();
+  renderAlerts(); renderMonths(months); fillPieMonths(); renderPie(); renderCats(); renderTable(); renderChips(); updateRulesBtn();
 }
 function renderChips(){
   const c=$("chips");c.innerHTML="";
@@ -941,6 +964,29 @@ function currentRows(){
   const q=$("tSearch").value.toLowerCase(),cat=$("tCat").value,mo=$("tMonth").value;
   return TX.filter(t=>(!q||t.desc.toLowerCase().includes(q))&&(!cat||t.cat===cat)&&(!mo||t.month===mo));
 }
+function updateRulesBtn(){ const b=$("rulesBtn"); if(b)b.textContent="Remembered rules ("+ruleCount()+")"; }
+function renderRules(){
+  const p=$("rulesPanel"); const rows=[];
+  for(const k in ONE_OFF){
+    const [dt,amt,ds]=k.split("|");
+    rows.push({label:"Only this one — "+dt+", "+fmt(+amt)+", “"+ds+"…” → "+ONE_OFF[k],kind:"oneoff",key:k});
+  }
+  for(const k in AMOUNT_RULES){
+    const [m,amt]=k.split("|");
+    rows.push({label:"Every "+fmt(+amt)+" from "+m+" → "+AMOUNT_RULES[k],kind:"amt",key:k});
+  }
+  for(const m in CUSTOM_RULES)
+    rows.push({label:"Everything from "+m+" → "+CUSTOM_RULES[m],kind:"merch",key:m});
+  p.innerHTML=rows.length?rows.map((r,i)=>'<div class="pl-row" style="grid-template-columns:1fr auto"><span style="font-size:.82rem">'+esc(r.label)+'</span><button class="clearb" style="border:none;border-radius:6px;padding:3px 9px;font-size:.72rem;cursor:pointer;font-family:inherit;background:var(--sky);color:var(--brand-deep)" data-k="'+i+'">Remove</button></div>').join(""):'<div class="a-note" style="padding:8px 0">No remembered rules yet. They appear here when you change a category.</div>';
+  p.querySelectorAll("button[data-k]").forEach(b=>b.onclick=()=>{
+    const r=rows[+b.dataset.k];
+    if(r.kind==="oneoff")delete ONE_OFF[r.key];
+    else if(r.kind==="amt")delete AMOUNT_RULES[r.key];
+    else delete CUSTOM_RULES[r.key];
+    saveCustomRules(); saveOneOff();
+    recomputeCats(); refreshAll(); renderRules();
+  });
+}
 function renderTable(){
   const rows=currentRows();
   const view=rows.slice(0,shown);
@@ -958,19 +1004,30 @@ function renderTable(){
     const finish=v=>{
       if(!v||v===t.cat){ renderTable(); return; }
       if(t.amount>0){ askScope(v); return; }
-      setMerchantCategory(t.merchant,v); refreshAll(); };
+      setMerchantCategory(t.merchant,v);
+      if(t.cat!==v)setOneOffCategory(t,v);
+      refreshAll(); };
     const askScope=v=>{
       const box=document.createElement("span"); box.className="limedit";
       const b1=document.createElement("button"); b1.className="setb";
       b1.textContent="Only "+fmt(t.amount)+" credits"; b1.title="Apply "+v+" to every credit of exactly "+fmt(t.amount)+" from this source";
       const b2=document.createElement("button"); b2.className="setb"; b2.style.background="#4C8AD1";
       b2.textContent="All from this source"; b2.title="Apply "+v+" to every transaction from "+t.merchant;
+      const b3=document.createElement("button"); b3.className="setb"; b3.style.background="#23A896";
+      b3.textContent="Just this transaction"; b3.title="Apply "+v+" to this transaction only — ideal for one-off or varying amounts";
       const bc=document.createElement("button"); bc.textContent="✕"; bc.className="clearb"; bc.title="Cancel";
-      box.appendChild(b1); box.appendChild(b2); box.appendChild(bc);
+      box.appendChild(b1); box.appendChild(b3); box.appendChild(b2); box.appendChild(bc);
       sel.replaceWith(box);
       let closed=false;
-      b1.onclick=()=>{ if(closed)return; closed=true; setAmountCategory(t.merchant,t.amount,v); refreshAll(); };
-      b2.onclick=()=>{ if(closed)return; closed=true; setMerchantCategory(t.merchant,v); refreshAll(); };
+      b1.onclick=()=>{ if(closed)return; closed=true;
+        if(ONE_OFF[txKey(t)]){delete ONE_OFF[txKey(t)];saveOneOff();}
+        setAmountCategory(t.merchant,t.amount,v);
+        if(t.cat!==v)setOneOffCategory(t,v); refreshAll(); };
+      b2.onclick=()=>{ if(closed)return; closed=true;
+        if(ONE_OFF[txKey(t)]){delete ONE_OFF[txKey(t)];saveOneOff();}
+        setMerchantCategory(t.merchant,v);
+        if(t.cat!==v)setOneOffCategory(t,v); refreshAll(); };
+      b3.onclick=()=>{ if(closed)return; closed=true; setOneOffCategory(t,v); refreshAll(); };
       bc.onclick=()=>{ if(closed)return; closed=true; renderTable(); };
     };
     const askNewName=()=>{
@@ -1014,7 +1071,7 @@ function handleFile(file){
   FILE_NAME=file.name||"";
   const rd=new FileReader();
   rd.onload=e=>{
-    loadCustomRules(); loadCustomCats(); loadDismissed(); loadBudgets();
+    loadCustomRules(); loadCustomCats(); loadDismissed(); loadBudgets(); loadOneOff();
     const n=loadRows(parseCSV(e.target.result));
     if(!n){
       const dz=document.getElementById("dropzone");
@@ -1037,6 +1094,10 @@ $("fileInput").onchange=e=>{if(e.target.files[0])handleFile(e.target.files[0]);}
 ["dragover","dragenter"].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add("drag");}));
 ["dragleave","drop"].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove("drag");}));
 dz.addEventListener("drop",e=>{const f=e.dataTransfer.files[0];if(f)handleFile(f);});
+$("rulesBtn").onclick=()=>{
+  const p=$("rulesPanel"); const open=p.style.display!=="none";
+  p.style.display=open?"none":"block"; if(!open)renderRules();
+};
 $("changeFile").onclick=()=>{
   $("loaded").style.display="none"; $("uploader").style.display="block";
   $("fileInput").value="";
