@@ -1,9 +1,13 @@
 <!DOCTYPE html>
 <!--
   Clearview Budget — private in-browser bank statement analyser
-  Current: v1.13 — 4 September 2026
+  Current: v1.14 — 25 October 2026
 
   Revision history
+  v1.14 25 Oct 2026  Money in / Money out / Net now exclude transfers between accounts
+                     (shown separately as "excl. $X transfers"); monthly chart and
+                     "biggest expenses" exclude transfers too ("biggest transfers" shows
+                     them); fixed income line under Money in being overwritten
   v1.13 4 Sep 2026  Fix: changing a category on a rule-protected transaction was silently
                     ignored — the clicked transaction now always takes the chosen category.
                     New "Remembered rules" panel to view and remove saved rules.
@@ -299,7 +303,7 @@ footer{max-width:1040px;margin:0 auto;padding:0 16px 40px;color:var(--muted);fon
   <div class="summary">
     <div class="card stat"><div class="lbl">Money in</div><div class="val in num" id="sIn"></div><div class="sub" id="sPeriod"></div></div>
     <div class="card stat"><div class="lbl">Money out</div><div class="val out num" id="sOut"></div><div class="sub" id="sCount"></div></div>
-    <div class="card stat"><div class="lbl">Net position</div><div class="val num" id="sNet"></div><div class="sub">in minus out</div></div>
+    <div class="card stat"><div class="lbl">Net position</div><div class="val num" id="sNet"></div><div class="sub">in minus out, excl. transfers</div></div>
     <div class="card stat"><div class="lbl">Avg monthly spend</div><div class="val num" id="sAvg"></div><div class="sub">excl. transfers</div></div>
   </div>
 </section>
@@ -329,7 +333,8 @@ footer{max-width:1040px;margin:0 auto;padding:0 16px 40px;color:var(--muted);fon
   <h2>Month by month</h2>
   <div class="card chartcard">
     <div class="legend"><span><span class="dot" style="background:#1D7A63"></span>Money in</span>
-      <span><span class="dot" style="background:#1C5FA8"></span>Money out</span></div>
+      <span><span class="dot" style="background:#1C5FA8"></span>Money out</span>
+      <span style="margin-left:auto">transfers between accounts excluded</span></div>
     <div id="monthChart"></div>
   </div>
   <div class="card chartcard" style="margin-top:14px">
@@ -373,7 +378,7 @@ footer{max-width:1040px;margin:0 auto;padding:0 16px 40px;color:var(--muted);fon
 </section>
 </div>
 </main>
-<footer><span style="float:right;color:#8AA2B8">Clearview Budget v1.13 — 4 September 2026</span>Amounts are read directly from your statement file and analysed locally. Categories are automatic best guesses from merchant names — always confirm anything important against your bank records.</footer>
+<footer><span style="float:right;color:#8AA2B8">Clearview Budget v1.14 — 25 October 2026</span>Amounts are read directly from your statement file and analysed locally. Categories are automatic best guesses from merchant names — always confirm anything important against your bank records.</footer>
 
 <script>
 /* ============ Core (data, parsing, analysis) ============ */
@@ -711,8 +716,10 @@ function answer(q){
   }
   // Biggest
   if(/biggest|largest|top |most expensive/.test(ql)){
-    const s=scope.filter(t=>t.amount<0).sort((a,b)=>a.amount-b.amount).slice(0,8);
-    return{head:"Your largest debits in "+scopeName+":",note:"",list:listOf(s)};
+    const wantTfr=/transfer/.test(ql);
+    const s=scope.filter(t=>t.amount<0&&(wantTfr?t.cat==="Transfers & payments":t.cat!=="Transfers & payments")).sort((a,b)=>a.amount-b.amount).slice(0,8);
+    return{head:"Your largest "+(wantTfr?"transfers out":"expenses")+" in "+scopeName+":",
+      note:wantTfr?"":"Transfers between your accounts are excluded — ask “biggest transfers” to see those.",list:listOf(s)};
   }
   // Fees
   if(/\bfees?\b|charged me|interest/.test(ql)){
@@ -782,11 +789,7 @@ let shown=50;
 function esc(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML;}
 
 function refreshAll(){
-  const {inc,out}=totals(TX);
-  const months=byMonth();
-  const spendNoTfr=TX.filter(t=>t.amount<0&&t.cat!=="Transfers & payments").reduce((a,t)=>a+-t.amount,0);
-  $("sAvg").textContent=fmt(spendNoTfr/Math.max(months.length,1));
-  fillFilters(); renderAlerts(); fillPieMonths(); renderPie(); renderCats(); renderTable(); updateRulesBtn();
+  renderStats(); fillFilters(); renderAlerts(); renderMonths(byMonth()); fillPieMonths(); renderPie(); renderCats(); renderTable(); updateRulesBtn();
   const p=$("rulesPanel"); if(p&&p.style.display!=="none")renderRules();
 }
 let FILE_NAME="";
@@ -804,20 +807,26 @@ function renderRangeBar(){
     (FILE_NAME?' from “'+esc(FILE_NAME)+'”':"")+
     (partial?' — <span class="part">'+monthLabelFull(last)+" is partial (to "+b.getDate()+" "+monthLabel(last).split(" ")[0]+"), so its totals and limit tracking are incomplete</span>":"");
 }
-function render(){
-  $("uploader").style.display="none";$("loaded").style.display="block";
-  renderRangeBar();
-  const {inc,out}=totals(TX);
-  $("sIn").textContent=fmt(inc); $("sOut").textContent=fmt(out);
-  const incomeTot=TX.filter(t=>t.amount>0&&t.cat==="Income").reduce((a,t)=>a+t.amount,0);
-  $("sPeriod").textContent=incomeTot>0?(fmt(incomeTot)+" of it categorised as income"):periodLabel();
-  const net=inc-out; $("sNet").textContent=fmtSigned(net);
+function renderStats(){
+  let inEx=0,outEx=0,tfrIn=0,tfrOut=0,incomeTot=0;
+  for(const t of TX){
+    if(t.cat==="Transfers & payments"){ if(t.amount>0)tfrIn+=t.amount; else tfrOut+=-t.amount; }
+    else{ if(t.amount>0){inEx+=t.amount; if(t.cat==="Income")incomeTot+=t.amount;} else outEx+=-t.amount; }
+  }
+  $("sIn").textContent=fmt(inEx); $("sOut").textContent=fmt(outEx);
+  $("sPeriod").textContent=(incomeTot>0?fmt(incomeTot)+" income · ":"")+"excl. "+fmt(tfrIn)+" transfers in";
+  $("sCount").textContent="excl. "+fmt(tfrOut)+" transfers out";
+  const net=inEx-outEx; $("sNet").textContent=fmtSigned(net);
   $("sNet").style.color=net>=0?"var(--in)":"var(--out)";
-  $("sPeriod").textContent=periodLabel();
-  $("sCount").textContent=TX.length+" transactions";
   const months=byMonth();
   const spendNoTfr=TX.filter(t=>t.amount<0&&t.cat!=="Transfers & payments").reduce((a,t)=>a+-t.amount,0);
   $("sAvg").textContent=fmt(spendNoTfr/Math.max(months.length,1));
+}
+function render(){
+  $("uploader").style.display="none";$("loaded").style.display="block";
+  renderRangeBar();
+  renderStats();
+  const months=byMonth();
   renderAlerts(); renderMonths(months); fillPieMonths(); renderPie(); renderCats(); renderTable(); renderChips(); updateRulesBtn();
 }
 function renderChips(){
@@ -866,6 +875,7 @@ function renderAlerts(){
   };
 }
 function renderMonths(months){
+  months=months.map(m=>{let i=0,o=0;for(const t of m.tx){if(t.cat==="Transfers & payments")continue;if(t.amount>0)i+=t.amount;else o+=-t.amount;}return{month:m.month,inc:i,out:o};});
   const W=Math.min(940,Math.max(320,document.body.clientWidth-80)),H=180,pad=34;
   const max=Math.max(...months.map(m=>Math.max(m.inc,m.out)),1);
   const bw=Math.min(38,(W-pad)/(months.length*2.6));
